@@ -374,6 +374,10 @@ typedef NS_ENUM(NSUInteger, LogLevel) {
 }
 
 - (void)centralManager:(CBCentralManager *)central didDiscoverPeripheral:(CBPeripheral *)peripheral advertisementData:(NSDictionary<NSString *,id> *)advertisementData RSSI:(NSNumber *)RSSI {
+    NSString *localName = [advertisementData objectForKey:@"kCBAdvDataLocalName"];
+    if (localName != nil && ![localName isEqualToString:peripheral.name]) {
+        [peripheral setValue:localName forKey:@"name"];
+    }
   [self.scannedPeripherals setObject:peripheral
                               forKey:[[peripheral identifier] UUIDString]];
   ProtosScanResult *result = [self toScanResultProto:peripheral advertisementData:advertisementData RSSI:RSSI];
