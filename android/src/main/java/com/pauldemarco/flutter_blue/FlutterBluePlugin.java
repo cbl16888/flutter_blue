@@ -40,6 +40,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.logging.Logger;
 
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
@@ -64,6 +65,8 @@ import io.flutter.plugin.common.PluginRegistry.RequestPermissionsResultListener;
 public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCallHandler, RequestPermissionsResultListener  {
     private static final String TAG = "FlutterBluePlugin";
     private static FlutterBluePlugin instance;
+    private BluetoothGatt currentGatt;
+    private BluetoothDeviceCache currentDeviceCache;
     private Object initializationLock = new Object();
     private Context context;
     private MethodChannel channel;
@@ -80,7 +83,7 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
 
     private static final int REQUEST_FINE_LOCATION_PERMISSIONS = 1452;
     static final private UUID CCCD_ID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
-    private final Map<String, BluetoothDeviceCache> mDevices = new HashMap<>();
+//    private static final Map<String, BluetoothDeviceCache> mDevices = new HashMap<>();
     private LogLevel logLevel = LogLevel.EMERGENCY;
 
     // Pending call and result for startScan, in the case where permissions are needed
@@ -271,7 +274,7 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
                     p.addDevices(ProtoMaker.from(d));
                 }
                 result.success(p.build().toByteArray());
-                log(LogLevel.EMERGENCY, "mDevices size: " + mDevices.size());
+//                log(LogLevel.EMERGENCY, "mDevices size: " + mDevices.size());
                 break;
             }
 
@@ -290,29 +293,36 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
                 boolean isConnected = mBluetoothManager.getConnectedDevices(BluetoothProfile.GATT).contains(device);
 
                 // If device is already connected, return error
-                if(mDevices.containsKey(deviceId) && isConnected) {
+                if(null != currentGatt && isConnected) {
                     result.error("already_connected", "connection with device already exists", null);
                     return;
                 }
 
                 // If device was connected to previously but is now disconnected, attempt a reconnect
-                if(mDevices.containsKey(deviceId) && !isConnected) {
-                    if(mDevices.get(deviceId).gatt.connect()){
-                        result.success(null);
-                    } else {
-                        result.error("reconnect_error", "error when reconnecting to device", null);
-                    }
-                    return;
-                }
+//                if(null != currentGatt && currentGatt.getDevice().getAddress().equals(deviceId) && !isConnected) {
+//                    if(currentGatt.connect()){
+//                        result.success(null);
+//                    } else {
+//                        result.error("reconnect_error", "error when reconnecting to device", null);
+//                    }
+//                    return;
+//                }
 
                 // New request, connect and add gattServer to Map
-                BluetoothGatt gattServer;
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                    gattServer = device.connectGatt(activity, options.getAndroidAutoConnect(), mGattCallback, BluetoothDevice.TRANSPORT_LE);
-                } else {
-                    gattServer = device.connectGatt(activity, options.getAndroidAutoConnect(), mGattCallback);
+                if (null != currentGatt) {
+//                    currentGatt.disconnect();
+                    currentGatt.close();
+                    currentGatt = null;
+                    currentDeviceCache.gatt.close();
+                    currentDeviceCache = null;
                 }
-                mDevices.put(deviceId, new BluetoothDeviceCache(gattServer));
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    currentGatt = device.connectGatt(activity, options.getAndroidAutoConnect(), mGattCallback, BluetoothDevice.TRANSPORT_LE);
+                } else {
+                    currentGatt = device.connectGatt(activity, options.getAndroidAutoConnect(), mGattCallback);
+                }
+                currentDeviceCache = new BluetoothDeviceCache(currentGatt);
+//                mDevices.put(deviceId, );
                 result.success(null);
                 break;
             }
@@ -322,13 +332,14 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
                 String deviceId = (String)call.arguments;
                 BluetoothDevice device = mBluetoothAdapter.getRemoteDevice(deviceId);
                 int state = mBluetoothManager.getConnectionState(device, BluetoothProfile.GATT);
-                BluetoothDeviceCache cache = mDevices.remove(deviceId);
-                if(cache != null) {
-                    BluetoothGatt gattServer = cache.gatt;
-                    gattServer.disconnect();
-                    if(state == BluetoothProfile.STATE_DISCONNECTED) {
-                        gattServer.close();
+//                BluetoothDeviceCache cache = mDevices.get(deviceId);
+                try {
+                    BluetoothGatt gattServer = locateGatt(deviceId);
+                    if(gattServer != null) {
+                        gattServer.disconnect();
                     }
+                } catch (Exception e) {
+                    e.printStackTrace();
                 }
                 result.success(null);
                 break;
@@ -586,11 +597,11 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
             case "mtu":
             {
                 String deviceId = (String)call.arguments;
-                BluetoothDeviceCache cache = mDevices.get(deviceId);
-                if(cache != null) {
+//                BluetoothDeviceCache cache = mDevices.get(deviceId);
+                if(currentDeviceCache != null && currentDeviceCache.gatt.getDevice().getAddress().equals(deviceId)) {
                     Protos.MtuSizeResponse.Builder p = Protos.MtuSizeResponse.newBuilder();
                     p.setRemoteId(deviceId);
-                    p.setMtu(cache.mtu);
+                    p.setMtu(currentDeviceCache.mtu);
                     result.success(p.build().toByteArray());
                 } else {
                     result.error("mtu", "no instance of BluetoothGatt, have you connected first?", null);
@@ -655,11 +666,11 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
     }
 
     private BluetoothGatt locateGatt(String remoteId) throws Exception {
-        BluetoothDeviceCache cache = mDevices.get(remoteId);
-        if(cache == null || cache.gatt == null) {
+//        BluetoothDeviceCache cache = mDevices.get(remoteId);
+        if(currentGatt == null || !currentGatt.getDevice().getAddress().equals(remoteId)) {
             throw new Exception("no instance of BluetoothGatt, have you connected first?");
         } else {
-            return cache.gatt;
+            return currentGatt;
         }
     }
 
@@ -859,15 +870,8 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
         public void onConnectionStateChange(BluetoothGatt gatt, int status, int newState) {
             log(LogLevel.DEBUG, "[onConnectionStateChange] status: " + status + " newState: " + newState);
             if(newState == BluetoothProfile.STATE_DISCONNECTED) {
-                String deviceId = gatt.getDevice().getAddress();
-                if(mDevices.containsKey(deviceId)) {
-                    BluetoothDeviceCache cache = mDevices.remove(deviceId);
-                    if (null != cache) {
-                        cache.gatt.disconnect();
-                        cache.gatt.close();
-                    }
-                    gatt.disconnect();
-                    gatt.close();
+                if(null != currentGatt && currentGatt.getDevice().getAddress().equals(gatt.getDevice().getAddress())) {
+                    currentGatt.close();
                 }
             }
             invokeMethodUIThread("DeviceState", ProtoMaker.from(gatt.getDevice(), newState).toByteArray());
@@ -979,9 +983,9 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
         public void onMtuChanged(BluetoothGatt gatt, int mtu, int status) {
             log(LogLevel.DEBUG, "[onMtuChanged] mtu: " + mtu + " status: " + status);
             if(status == BluetoothGatt.GATT_SUCCESS) {
-                if(mDevices.containsKey(gatt.getDevice().getAddress())) {
-                    BluetoothDeviceCache cache = mDevices.get(gatt.getDevice().getAddress());
-                    cache.mtu = mtu;
+                if(null != currentDeviceCache &&  currentDeviceCache.gatt.getDevice().getAddress().equals(gatt.getDevice().getAddress())) {
+//                    BluetoothDeviceCache cache = mDevices.get(gatt.getDevice().getAddress());
+                    currentDeviceCache.mtu = mtu;
                     Protos.MtuSizeResponse.Builder p = Protos.MtuSizeResponse.newBuilder();
                     p.setRemoteId(gatt.getDevice().getAddress());
                     p.setMtu(mtu);
